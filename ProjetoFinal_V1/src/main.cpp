@@ -4,6 +4,8 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 
+#include <TFT_eSPI.h>
+
 // ====== PARÂMETROS ======
 const int pinVoltageSensor = 34;       // Pino usado pra fazer a leitura do sensor de tensão
 const float V_OFFSET = 1.6f;    // offset do sensor medido no scope 
@@ -12,7 +14,6 @@ const float V_INPUT  = 129.4f;  // referência, tensãod de rede definida no mul
 // ====== TOLERÂNCIA DE MEDIDA ======
 const float V_INPUT_MAX_ERROR = V_INPUT + 0.1*V_INPUT;
 const float V_INPUT_MIN_ERROR = V_INPUT - 0.1*V_INPUT;
-
 
 // TAXA DE AMOSTRAGEM
 const int   SAMPLES = 120;                                   // 120 amostras -> critério de Nyquist
@@ -23,15 +24,20 @@ QueueHandle_t xQueueSamples;
 QueueHandle_t xQueueRMSVoltage;
 float gScaleFactor = 1.0f;  // começa em 1.0, vai ser calibrado
 
+// ====== OBJETO DO DISPLAY ======
+TFT_eSPI tft = TFT_eSPI();
+
 // ====== VARIAVEIS DE HANDLER DAS TASKS ======
 TaskHandle_t taskCalibHandle = NULL;
 TaskHandle_t taskProcessorHandle = NULL;
 TaskHandle_t taskSamplerHandle = NULL;
+TaskHandle_t taskDisplayHandle = NULL;
 
 // ====== PROTÓTIPOS DAS TASKS ======
 void vTaskVoltageCallibrate(void *pvParameters);
 void vTaskVoltageSampler(void *pvParameters);
 void vTaskVoltageProcessor(void *pvParameters);
+void vTaskDisplay(void *pvParameters);
 
 // ====== SETUP ======
 void setup() {
@@ -39,12 +45,19 @@ void setup() {
   analogReadResolution(12); // configura toda a resolução do ADC da ESP
   analogSetAttenuation(ADC_11db); // configura atenuação para ADC da ESP
 
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+
   // filas para amostras e leituras RMS
   xQueueSamples = xQueueCreate(SAMPLES, sizeof(float));
   xQueueRMSVoltage = xQueueCreate(1, sizeof(float));
 
   // por enquanto só criamos a task de calibração
   xTaskCreate(vTaskVoltageCallibrate,"Calibration", 4096, nullptr, configMAX_PRIORITIES-1, &taskCalibHandle);
+  xTaskCreate(vTaskDisplay, "Display", 2048, nullptr, 1, &taskDisplayHandle);
 }
 
 void loop() {
@@ -145,4 +158,74 @@ void vTaskVoltageProcessor(void *pv) {
       vTaskDelete(NULL);
     }
   }
+}
+
+void vTaskDisplay(void *pv){
+  float rmsRecebido, correnteRecebido = 10.0;
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_MAROON);
+  tft.setCursor(70, 0);
+  tft.print("Corrente RMS:");
+  tft.drawLine(10,20,20,20,TFT_MAROON);
+  tft.drawCircle(30,20,10,TFT_MAROON);
+  tft.drawLine(40,20,50,20,TFT_MAROON);
+  tft.setCursor(26,13);
+  tft.print("A");
+
+  tft.setTextColor(TFT_BLUE);
+  tft.setCursor(70, 45);
+  tft.print("Tensao RMS:");
+  tft.drawLine(10,65,20,65,TFT_BLUE);
+  tft.drawCircle(30,65,10,TFT_BLUE);
+  tft.drawLine(40,65,50,65,TFT_BLUE);
+  tft.setCursor(26,58);
+  tft.print("V");
+
+  tft.setTextColor(TFT_YELLOW);
+  tft.setCursor(70, 90);
+  tft.print("Potencia:");
+  tft.drawLine(10,110,20,110,TFT_YELLOW);
+  tft.drawCircle(30,110,10,TFT_YELLOW);
+  tft.drawLine(40,110,50,110,TFT_YELLOW);
+  tft.setCursor(26,103);
+  tft.print("W");
+
+  while (1)
+  {
+    if (xQueueReceive(xQueueRMSVoltage, &rmsRecebido, pdMS_TO_TICKS(100))){
+      float potencia = rmsRecebido * correnteRecebido;
+
+      // Escrever o valor da tensao
+      tft.setTextColor(TFT_BLUE, TFT_BLACK);
+      tft.setCursor(90, 65);
+      tft.print(rmsRecebido, 2);
+      tft.print(" V ");
+
+      // Escrever o valor da potencia
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.setCursor(90, 110);
+      tft.print(potencia, 2);
+      tft.print(" W ");
+
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    // if (xQueueReceive(xQueueRMSCurrent, &correnteRecebido, pdMS_TO_TICKS(100))){
+    //   float potencia = rmsRecebido * correnteRecebido;
+
+    //   // Escrever o valor da corrente
+    //   tft.setTextColor(TFT_MAROON, TFT_BLACK);
+    //   tft.setCursor(90, 20);
+    //   tft.print(correnteRecebido, 2);
+    //   tft.print(" A");
+
+    //   // Escrever o valor da potencia
+    //   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    //   tft.setCursor(90, 110);
+    //   tft.print(potencia, 2);
+    //   tft.print(" W ");
+
+    //   vTaskDelay(pdMS_TO_TICKS(500));
+  }
+  
 }
