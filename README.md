@@ -1,4 +1,4 @@
-# ELF74-Sistemas_Embarcados
+# ELF74-Sistemas Embarcados - Projeto Final
 Repositório contendo o projeto final da disciplina ELF74 - Sistemas Embarcados - 2025.1
 
 ## Projeto: 
