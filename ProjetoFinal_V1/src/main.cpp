@@ -5,18 +5,16 @@
 #include <freertos/queue.h>
 
 // ====== PARÂMETROS ======
-const int pinVoltageSensor = 34;       // Pino usado pra fazer a leitura do sensor de tensão
-const float V_OFFSET = 1.6f;    // offset do sensor medido no scope 
-const float V_INPUT  = 129.4f;  // referência, tensãod de rede definida no multimetro
+const int pinVoltageSensor = 34; // Pino usado pra fazer a leitura do sensor de tensão
+const float V_OFFSET = 1.6f; // offset do sensor medido no scope
+const float NOM1    = 0.28f; // valor esperado no sensor quando alimentado com 127V
+const float NOM2    = 0.37f; // valor esperado no sensor quando alimentado com 220V  
+float gMAX = 0.0; // tolerância máxima global
+float gMIN = 0.0; // tolerância mínima global
 
-// ====== TOLERÂNCIA DE MEDIDA ======
-const float V_INPUT_MAX_ERROR = V_INPUT + 0.1*V_INPUT;
-const float V_INPUT_MIN_ERROR = V_INPUT - 0.1*V_INPUT;
-
-
-// TAXA DE AMOSTRAGEM
-const int   SAMPLES = 120;                                   // 120 amostras -> critério de Nyquist
-TickType_t SAMPLE_PERIOD = pdMS_TO_TICKS(1000UL / SAMPLES);  // periodo definido de leituras
+// ====== DEFINIÇÃO DA TAXA DE AMOSTRAGEM ======
+const int   SAMPLES = 120; // 120 amostras -> critério de Nyquist
+TickType_t SAMPLE_PERIOD = pdMS_TO_TICKS(1000UL / SAMPLES); // periodo definido de leituras
 
 // ====== FILA DE AMOSTRAS, LEITURAS DE TENSÃO RMS E FATOR DE CALIBRAÇÃO======
 QueueHandle_t xQueueSamples;
@@ -48,35 +46,49 @@ void setup() {
 }
 
 void loop() {
-  vTaskDelay(1000); /* libera a CPU por 1000 ticks */
+  vTaskDelay(1000);
 }
 
 void vTaskVoltageCallibrate(void* pv) {
   TickType_t xLastWake = xTaskGetTickCount(); // define quantos ticks se passaram desde que o scheduler foi chamado
-  double sumSq = 0;
 
-  Serial.println("=== Iniciando Calibração do Sensor de Tensão ===");
+  Serial.println("=== Iniciando calibração do sensor de tensão ===");
 
-  // faça 120 leituras espaçadas pelo período de amostragem
+  double sumSq = 0; // a partir daqui faz-se uma amostragem e calculo RMS inicial
   for (int i = 0; i < SAMPLES; i++) {
     int raw = analogRead(pinVoltageSensor);
     float v = raw * (3.3f/4095.0f) - V_OFFSET;
     sumSq += (double)v * v;
-
-    // libera a CPU até o próximo “tick” de amostragem
     vTaskDelayUntil(&xLastWake, SAMPLE_PERIOD);
   }
+  float rmsSensor = sqrt(sumSq / (double)SAMPLES);
 
-  // após 120 amostras, já terão se passado cerca de 1000 ms
-  float rmsSensor   = sqrt(sumSq / (double)SAMPLES);
-  gScaleFactor      = V_INPUT / rmsSensor;
-  Serial.println("=== Calibração concluída ===");
+  // Teste automático contra 127 V e 220 V
+  if (rmsSensor >= 0.7*NOM1 && rmsSensor <= 1.3*NOM1) {
+    gScaleFactor = 127 / rmsSensor;
+    gMIN = 0.9*127;
+    gMAX = 1.1*127;
+    Serial.println("Detectado: 127 V"); // se os valores baterem, estamos medindo 127V
+  }
+  else if (rmsSensor >= 0.7*NOM2 && rmsSensor <= 1.3*NOM2) {
+    gScaleFactor = 220 / rmsSensor;
+    gMIN = 0.9*220;
+    gMAX = 1.1*220;
+    Serial.println("Detectado: 220 V"); // se os valores baterem, estamos medindo 220V
+  }
+  else {
+    gScaleFactor = 127 / rmsSensor;
+    gMIN = 0.9*127;
+    gMAX = 1.1*127;
+    Serial.println("Falha na detecção; usando 127 V por default"); // contingência - fallback para 127V
+  }
+  Serial.println("=== Fim da calibração ===");
 
-  // agora que gScaleFactor está ajustado, pode-se criar as outras tasks
-  xTaskCreate(vTaskVoltageSampler, "Sampler", 2048, nullptr, 2, &taskSamplerHandle);
+  // 5) Recria as tasks de leitura e processamento
+  xTaskCreate(vTaskVoltageSampler,   "Sampler",   2048, nullptr, 2, &taskSamplerHandle);
   xTaskCreate(vTaskVoltageProcessor, "Processor", 2048, nullptr, 1, &taskProcessorHandle);
 
-  // fim da calibração — mata a si própria
+  // 6) Mata a própria task de calibração
   vTaskDelete(nullptr);
 }
 
@@ -137,7 +149,7 @@ void vTaskVoltageProcessor(void *pv) {
     Serial.println(rmsRede, 4);
     
     // handler de calibração caso leitura se torne inconsistente 
-    if (rmsRede < V_INPUT_MIN_ERROR || rmsRede > V_INPUT_MAX_ERROR)
+    if (rmsRede < gMIN || rmsRede > gMAX)
     {
       Serial.println("=== Necessário Calibração ===");
       xTaskCreate(vTaskVoltageCallibrate,"Calibration", 4096, nullptr, configMAX_PRIORITIES-1, &taskCalibHandle);
