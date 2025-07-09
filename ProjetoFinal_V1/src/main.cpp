@@ -160,8 +160,24 @@ void vTaskVoltageProcessor(void *pv) {
   }
 }
 
+// Função para desenhar seta de tendência com cor customizada
+void setaTendencia(int16_t x, int16_t y, float current_val, float previous_val, float threshold, uint16_t cor) {
+  tft.fillRect(x - 6, y - 1, 12, 12, TFT_BLACK);
+  if (current_val > previous_val + threshold) {
+    // Seta para cima (usando cor fornecida)
+    tft.fillTriangle(x, y, x-5, y+10, x+5, y+10, cor);
+  } else if (current_val < previous_val - threshold) {
+    // Seta para baixo (usando cor fornecida)
+    tft.fillTriangle(x, y+10, x-5, y, x+5, y, cor);
+  } else {
+    // Valor estável (círculo amarelo - mantém amarelo para indicar estabilidade)
+    tft.fillCircle(x, y+5, 3, cor);
+  }
+}
+
 void vTaskDisplay(void *pv){
   float rmsRecebido, correnteRecebido = 10.0;
+  float rmsPrev, correntePrev, potenciaPrev, potenciaCalc;
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_MAROON);
   tft.setCursor(70, 0);
@@ -192,26 +208,31 @@ void vTaskDisplay(void *pv){
 
   while (1)
   {
+    potenciaPrev = potenciaCalc;
+    rmsPrev = rmsRecebido;
+    correntePrev = correnteRecebido;
     if (xQueueReceive(xQueueRMSVoltage, &rmsRecebido, pdMS_TO_TICKS(100))){
-      float potencia = rmsRecebido * correnteRecebido;
+      potenciaCalc = rmsRecebido * correnteRecebido;
 
       // Escrever o valor da tensao
       tft.setTextColor(TFT_BLUE, TFT_BLACK);
       tft.setCursor(90, 65);
       tft.print(rmsRecebido, 2);
       tft.print(" V ");
+      setaTendencia(215, 67, rmsRecebido, rmsPrev, 1.0, TFT_BLUE);
 
       // Escrever o valor da potencia
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
       tft.setCursor(90, 110);
-      tft.print(potencia, 2);
+      tft.print(potenciaCalc, 2);
       tft.print(" W ");
+      setaTendencia(215, 112, potenciaCalc, potenciaPrev, 1.0, TFT_YELLOW);
 
       vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     // if (xQueueReceive(xQueueRMSCurrent, &correnteRecebido, pdMS_TO_TICKS(100))){
-    //   float potencia = rmsRecebido * correnteRecebido;
+    //   potenciaCalc = rmsRecebido * correnteRecebido;
 
     //   // Escrever o valor da corrente
     //   tft.setTextColor(TFT_MAROON, TFT_BLACK);
@@ -222,7 +243,7 @@ void vTaskDisplay(void *pv){
     //   // Escrever o valor da potencia
     //   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     //   tft.setCursor(90, 110);
-    //   tft.print(potencia, 2);
+    //   tft.print(potenciaCalc, 2);
     //   tft.print(" W ");
 
     //   vTaskDelay(pdMS_TO_TICKS(500));
