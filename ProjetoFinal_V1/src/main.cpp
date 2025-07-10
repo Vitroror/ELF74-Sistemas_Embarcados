@@ -14,7 +14,7 @@ const float NOM2    = 0.37f; // valor esperado no sensor quando alimentado com 2
 float gMAX = 0.0; // tolerância máxima global
 float gMIN = 0.0; // tolerância mínima global
 
-const int CURRENT_SENSE_PIN = 3;
+const int CURRENT_SENSE_PIN = 35;
 const float VOLTAGE_REFERENCE = 3.3;
 const float SENSITIVITY = 0.04;
 const float OFFSET_VOLT = VOLTAGE_REFERENCE / 2;
