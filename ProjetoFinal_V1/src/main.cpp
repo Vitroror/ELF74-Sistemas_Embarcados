@@ -6,27 +6,30 @@
 
 #include <TFT_eSPI.h>
 
-// ====== PARÂMETROS ======
+// ====== PARÂMETROS TENSÃO ======
 const int pinVoltageSensor = 34; // Pino usado pra fazer a leitura do sensor de tensão
 const float V_OFFSET = 1.6f; // offset do sensor medido no scope
 const float NOM1    = 0.28f; // valor esperado no sensor quando alimentado com 127V
-const float NOM2    = 0.37f; // valor esperado no sensor quando alimentado com 220V  
+const float NOM2    = 0.37f; // valor esperado no sensor quando alimentado com 220V
 float gMAX = 0.0; // tolerância máxima global
 float gMIN = 0.0; // tolerância mínima global
 
+const int CURRENT_SENSE_PIN = 3;
+const float VOLTAGE_REFERENCE = 3.3;
+const float SENSITIVITY = 0.04;
+const float OFFSET_VOLT = VOLTAGE_REFERENCE / 2;
 
 // TAXA DE AMOSTRAGEM
 const int   SAMPLES = 120;                                   // 120 amostras -> critério de Nyquist
 TickType_t SAMPLE_PERIOD = pdMS_TO_TICKS(1000UL / SAMPLES);  // periodo definido de leituras
 
-
 // ====== FILA DE AMOSTRAS, LEITURAS DE TENSÃO RMS E FATOR DE CALIBRAÇÃO======
 QueueHandle_t xQueueSamples;
 QueueHandle_t xQueueRMSVoltage;
+QueueHandle_t xQueueCurrent;
 float gScaleFactor = 1.0f;  // começa em 1.0, vai ser calibrado
 int gZeroFlag = 0;
 float grmsSensor = 0;
-
 
 // ====== OBJETO DO DISPLAY ======
 TFT_eSPI tft = TFT_eSPI();
@@ -35,12 +38,14 @@ TFT_eSPI tft = TFT_eSPI();
 TaskHandle_t taskCalibHandle = NULL;
 TaskHandle_t taskProcessorHandle = NULL;
 TaskHandle_t taskSamplerHandle = NULL;
+TaskHandle_t taskCurrentSamplerHandle = NULL;
 TaskHandle_t taskDisplayHandle = NULL;
 
 // ====== PROTÓTIPOS DAS TASKS ======
 void vTaskVoltageCallibrate(void *pvParameters);
 void vTaskVoltageSampler(void *pvParameters);
 void vTaskVoltageProcessor(void *pvParameters);
+void vTaskCurrentSampler(void *pvParameters);
 void vTaskDisplay(void *pvParameters);
 
 // ====== SETUP ======
@@ -58,10 +63,13 @@ void setup() {
   // filas para amostras e leituras RMS
   xQueueSamples = xQueueCreate(SAMPLES, sizeof(float));
   xQueueRMSVoltage = xQueueCreate(1, sizeof(float));
+  xQueueCurrent = xQueueCreate(10, sizeof(float));
 
   // por enquanto só criamos a task de calibração
   xTaskCreate(vTaskVoltageCallibrate,"Calibration", 4096, nullptr, configMAX_PRIORITIES-1, &taskCalibHandle);
   xTaskCreate(vTaskDisplay, "Display", 2048, nullptr, 1, &taskDisplayHandle);
+
+  xTaskCreate(vTaskCurrentSampler, "CurrentSampler", 2048, nullptr, 2, &taskCurrentSamplerHandle);
 }
 
 void loop() {
@@ -82,7 +90,7 @@ void vTaskVoltageCallibrate(void* pv) {
   }
   float grmsSensor = sqrt(sumSq / (double)SAMPLES);
 
-  // Teste automático contra 127 V e 220 V
+  // Teste automático contra 127 V e 220 V
   if (grmsSensor >= 0.7*NOM1 && grmsSensor <= 1.3*NOM1) {
     gScaleFactor = 127 / grmsSensor;
     gMIN = 0.9*127;
@@ -133,7 +141,7 @@ void vTaskVoltageSampler(void *pv) {
       xTaskNotifyGive(taskProcessorHandle);
     }
 
-    // libera a CPU até a próxima amostra (~8 ms)
+    // libera a CPU até a próxima amostra (~8 ms)
     vTaskDelayUntil(&xLastWake, SAMPLE_PERIOD);
   }
 }
@@ -163,15 +171,12 @@ void vTaskVoltageProcessor(void *pv) {
     // envia a leitura sem bloqueio para a fila de interação com display
     xQueueOverwrite(xQueueRMSVoltage, &rmsRede);
 
-    //(ou, se preferir bloquear até 10 ms:)
-    // xQueueSend(xQueueRMS, &rmsRede, pdMS_TO_TICKS(10));
-
     // (debug) imprime valor de leitura
     Serial.print("RMS rede: ");
     Serial.println(rmsRede, 4);
     Serial.println(grmsSensor, 4);
-    
-    // handler de calibração caso leitura se torne inconsistente 
+
+    // handler de calibração caso leitura se torne inconsistente
     if(gZeroFlag == 0)
     {
       if (rmsRede < gMIN || rmsRede > gMAX)
@@ -193,6 +198,29 @@ void vTaskVoltageProcessor(void *pv) {
   }
 }
 
+// ====== TASK DE CORRENTE ======
+void vTaskCurrentSampler(void *pv) {
+  TickType_t xLastWake = xTaskGetTickCount();
+  for (;;) {
+    int raw_adc = analogRead(CURRENT_SENSE_PIN);
+
+    float voltage = raw_adc * (VOLTAGE_REFERENCE / 4095.0);
+
+    float current = (voltage - OFFSET_VOLT) / SENSITIVITY;
+
+    if (xQueueSendToBack(xQueueCurrent, &current, 0) != pdTRUE) {
+      float dummy;
+      xQueueReceive(xQueueCurrent, &dummy, 0);
+      xQueueSendToBack(xQueueCurrent, &current, 0);
+    }
+
+    Serial.print("Corrente: ");
+    Serial.println(current, 4);
+
+    vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(100));
+  }
+}
+
 // Função para desenhar seta de tendência com cor customizada
 void setaTendencia(int16_t x, int16_t y, float current_val, float previous_val, float threshold, uint16_t cor) {
   tft.fillRect(x - 6, y - 1, 12, 12, TFT_BLACK);
@@ -209,8 +237,9 @@ void setaTendencia(int16_t x, int16_t y, float current_val, float previous_val, 
 }
 
 void vTaskDisplay(void *pv){
-  float rmsRecebido, correnteRecebido = 10.0;
-  float rmsPrev, correntePrev, potenciaPrev, potenciaCalc;
+  float rmsRecebido = 0.0, correnteRecebido = 0.0;
+  float rmsPrev = 0.0, correntePrev = 0.0, potenciaPrev = 0.0, potenciaCalc = 0.0;
+
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_MAROON);
   tft.setCursor(70, 0);
@@ -244,6 +273,7 @@ void vTaskDisplay(void *pv){
     potenciaPrev = potenciaCalc;
     rmsPrev = rmsRecebido;
     correntePrev = correnteRecebido;
+
     if (xQueueReceive(xQueueRMSVoltage, &rmsRecebido, pdMS_TO_TICKS(100))){
       potenciaCalc = rmsRecebido * correnteRecebido;
 
@@ -260,26 +290,26 @@ void vTaskDisplay(void *pv){
       tft.print(potenciaCalc, 2);
       tft.print(" W ");
       setaTendencia(215, 112, potenciaCalc, potenciaPrev, 1.0, TFT_YELLOW);
-
-      vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    // if (xQueueReceive(xQueueRMSCurrent, &correnteRecebido, pdMS_TO_TICKS(100))){
-    //   potenciaCalc = rmsRecebido * correnteRecebido;
+    if (xQueueReceive(xQueueCurrent, &correnteRecebido, pdMS_TO_TICKS(100))){
+      potenciaCalc = rmsRecebido * correnteRecebido;
 
-    //   // Escrever o valor da corrente
-    //   tft.setTextColor(TFT_MAROON, TFT_BLACK);
-    //   tft.setCursor(90, 20);
-    //   tft.print(correnteRecebido, 2);
-    //   tft.print(" A");
+      // Escrever o valor da corrente
+      tft.setTextColor(TFT_MAROON, TFT_BLACK);
+      tft.setCursor(90, 20);
+      tft.print(correnteRecebido, 2);
+      tft.print(" A ");
+      setaTendencia(215, 22, correnteRecebido, correntePrev, 0.1, TFT_MAROON);
 
-    //   // Escrever o valor da potencia
-    //   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    //   tft.setCursor(90, 110);
-    //   tft.print(potenciaCalc, 2);
-    //   tft.print(" W ");
+      // Escrever o valor da potencia
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.setCursor(90, 110);
+      tft.print(potenciaCalc, 2);
+      tft.print(" W ");
+      setaTendencia(215, 112, potenciaCalc, potenciaPrev, 1.0, TFT_YELLOW);
+    }
 
-    //   vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
-  
 }
